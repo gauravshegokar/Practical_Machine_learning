@@ -1,0 +1,191 @@
+---
+title: "ML Project Capstone"
+author: "Gaurav"
+date: "2 December 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#1. Summary
+
+The Data comes from [Weight Lifting Exercises Dataset](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises). They did a research on discriminating between different activities and how well the activity is done. Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), incorrectly performed are classified into Class B, Class C, Class D, Class E. The **Goal** of this project is to analyse this data and build a prediction algorithm to correctly classify new activities into Class A, Class B, Class C, Class D, Class E. 
+The Project demonstrates performances of different algorithms and picks one with **low out of sample error**.
+
+*The script is reproducible.*
+
+#2. Getting Data
+
+The Dataset is downloaded from coursera 
+
+```{r}
+set.seed(12345)
+if(!file.exists("./dataset")){
+    dir.create("./dataset");
+    fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv";
+    download.file(fileUrl,destfile="./dataset/pml-training.csv");
+    
+    fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv";
+    download.file(fileUrl,destfile="./dataset/pml-testing.csv");
+}
+```
+
+### Analysing Raw Data
+The Downloaded Data contains 2 files *pml-training.csv*, *pml-testing.csv*. The *pml-training.csv* file contains training data and *pml-testing.csv* contains test data which we have to do prediction on.
+
+```{r}
+dataset <-  read.csv("./dataset/pml-training.csv", na.strings = c("","NA","NaN"))
+dataPredict <- read.csv("./dataset/pml-testing.csv", na.strings = c("","NA","NaN"))
+dim(dataset)
+dim(dataPredict)
+table(dataset$classe)
+```
+We can see that training data consists of **160 features** and 19622 examples. We have to do prediction on 20 examples. The division of outcome shows that there is no **skewness** in outcome variable
+
+#3. Cleaning
+Next step is to clean raw data. We store it in "clean" directory.
+Cleaning procedure is as follows.
+
+####1. build model on like data to predict like data
+
+In testing dataset we have no instances of new_window = "yes". so we are removing new_window = "yes" in training data.
+```{r}
+table(dataPredict$new_window)
+```
+
+####2. Removing Columns with NA values more than 40% of column values.
+
+If NA values are less than 40% we will impute data.
+
+####3. Removing columns unnecessary columns.
+
+Removing Columns that doesn't add anything to data i.e. that are not significant for prediction.
+
+```{r, message=F, warning=F}
+if(!file.exists("./dataset/clean")){
+    dir.create("./dataset/clean")
+    ## 2. Reading Data
+    dataset <-  read.csv("./dataset/pml-training.csv", na.strings = c("","NA","NaN"))
+    dataPredict <- read.csv("./dataset/pml-testing.csv", na.strings = c("","NA","NaN"))
+
+    #! Cleaning Data !#
+    ## keep like data to predict like data
+    ## testing dataset consists only no values for new_window variable
+    ## removing all values of yes in new_window feature in testing data
+    library(dplyr)
+    dataset <- filter(dataset, new_window == "no")
+    
+    ## removing columns with na values more than 40%
+    dataset <- dataset %>% select_if(colSums(!is.na(.)) > 0.60 * nrow(dataset))
+    
+    ## removing columns that doesn't add anything to data
+    dataset <- dataset %>% select(-c(X, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window))
+    # dim(dataset)
+    write.csv(dataset, file = "./dataset/clean/dataset.csv")
+    
+    ## cleaning predction dataset 
+    dataPredict <- filter(dataPredict, new_window == "no")
+    dataPredict <- dataPredict %>% select_if(colSums(!is.na(.)) > 0.60 * nrow(dataPredict))
+    dataPredict <- dataPredict %>% select(-c(X, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window))
+    write.csv(dataPredict, file = "./dataset/clean/dataPredict.csv")
+    rm(list =ls())
+}
+```
+
+Now data is in desired form. We will be performing further analysis on this data.
+
+#4. Exploratory Data Analysis
+Finally we are performing exploratory data analysis on clean data. Lets have a look at the data.
+
+```{r, warning=F, message=F}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(e1071)
+dataset <- read.csv("./dataset/clean/dataset.csv")
+dataPredict <- read.csv("./dataset/clean/dataPredict.csv")
+## removing X feature which is created when writing file
+dataset <- select(dataset, -X) 
+dataPredict <- select(dataPredict, -X)
+dim(dataset)
+```
+
+We see there are 54 features, which has outcome variable 'classe' which we want to predict.
+
+Since features are high we will see if we can make use of PCA.
+
+##PCA
+```{r, message=F, warning=F}
+svd1 <- svd(scale(select(dataset,-c(classe, user_name))))
+p1 <- qplot(x = seq_along(svd1$d),y = svd1$d, xlab = "Column", ylab = "Singular Value")
+p2 <- qplot(x = seq_along(svd1$d),y = svd1$d^2/sum(svd1$d^2), xlab = "Column", ylab = "Prop. of variance explained")
+grid.arrange(p1,p2, ncol = 2)
+```
+
+Number of PCA components explaining 95% variation in dataset
+```{r, warning=F,message=F}
+pp<-preProcess(dataset,method="pca",thresh=0.95)
+pp
+```
+The number of PCA components is 25 for explaining 95% of data. Which are  50% of 53 dataset features, we wont use them as they won't affect much and and would cause less interpretability.
+
+#5. Classification models
+## Creating training and testing datasets
+```{r}
+set.seed(12345)
+inTrain <- createDataPartition(dataset$classe, p = 0.7, list = F) 
+training <- dataset[inTrain,]
+testing <- dataset[-inTrain,]
+nrow(training)
+nrow(testing)
+```
+
+##1. Support Vector Machine
+Building SVM with k-fold cross validation with tuning parameters cost (0.1,1,10) and gamma (0.1,0.5,1)
+```{r, cache=TRUE, warning=F, message=F}
+## SVM
+svm_tune <- tune(svm, classe~., data = training[sample(nrow(training), 3000),],ranges=list(cost=10^(-1:1), gamma=c(0.1,.5,1)))
+```
+
+```{r}
+summary(svm_tune)
+model.svm <- svm_tune$best.model;
+model.svm
+```
+
+We select best model having high accuracy.
+Which has cost = 10 and gamma = 0.1
+
+
+Calculating out of sample error using confusionMatrix
+
+```{r, cache=T}
+confusionMatrix(testing$classe, predict(model.svm, testing))
+```
+
+we get the accuray of **0.9353** and Kappa = **0.9181**.
+
+##2. Random Forest
+Building Random Forest with k-fold cross validation having 10 folds
+```{r, cache=T, message=F, warning=F}
+control <- trainControl(method="cv", number=10)
+model.rfcvo <- train(classe~., method = "rf" ,data = training,ntree = 20,  trControl = control)
+model.rfcvo
+confusionMatrix(testing$classe,predict(model.rfcvo, testing))
+```
+
+We get the accuracy of **0.9887** and kappa = **0.9857**.
+
+Since **accuray of random forest is much higher than SVM** we will use random forest as our prediction algorithm on prediction dataset given by coursera.
+
+If accuracies of SVM and random forest are comparable then we would have ensembled(combine) them to achieve much robust prediction algorithm.
+
+#6. Applying prediction algorithm
+we apply the random forest prediction algorithm on prediction dataset given by coursera 
+
+```{r, warning=F, message=F}
+predict(model.rfcvo, dataPredict)
+```
